@@ -68,6 +68,9 @@ StudyBuddy follows Django's model-template-view pattern:
 |   `-- db.sqlite3     # Local development database (not committed)
 |-- docs/              # Project documentation and audit notes
 |-- scripts/           # Reserved for project scripts
+|-- .github/
+|   `-- workflows/
+|       `-- ci.yml     # Continuous integration checks
 |-- .env.example       # Example environment configuration
 |-- .gitignore
 `-- README.md
@@ -77,26 +80,40 @@ StudyBuddy follows Django's model-template-view pattern:
 
 ### Prerequisites
 
-- Python 3.10 or later
+- Python 3.10
 - pip
 - Git
 
-The project is developed and tested with Python 3.10 and Django 4.2.
+The project is developed and tested with Python 3.10 and Django 4.2. CI uses Python 3.10.
 
 ### Installation
 
+Clone the repository and change into the backend directory in Windows PowerShell:
+
 ```powershell
 git clone https://github.com/MB3R3/studybuddy.git
-cd studybuddy/backend
-python -m venv .venv
+cd studybuddy
+cd backend
+py -3.10 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements/base.txt
 ```
 
-On macOS or Linux, activate the virtual environment with:
+If PowerShell blocks local scripts, allow them for the current session only:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\.venv\Scripts\Activate.ps1
+```
+
+Activate the virtual environment in each new shell before running Django commands. If you prefer not to activate it, replace `python` with `.\.venv\Scripts\python.exe` in the commands below.
+
+On macOS or Linux, create and activate the virtual environment with:
 
 ```bash
+python3.10 -m venv .venv
 source .venv/bin/activate
+python -m pip install -r requirements/base.txt
 ```
 
 ### Environment configuration
@@ -121,10 +138,9 @@ Do not commit secrets or production credentials to the repository.
 
 ### Database setup
 
-Apply the existing migrations before starting the application:
+From the `backend` directory, apply the existing migrations before starting the application:
 
 ```powershell
-cd backend
 python manage.py migrate
 ```
 
@@ -138,8 +154,9 @@ The default database is `backend/db.sqlite3`. It is intended for local developme
 
 ### Running the application
 
+From the `backend` directory:
+
 ```powershell
-cd backend
 python manage.py runserver
 ```
 
@@ -155,11 +172,7 @@ The admin interface is available at `http://127.0.0.1:8000/admin/`.
 
 ## Testing
 
-Run the automated test suite from the `backend` directory:
-
-```powershell
-python manage.py test
-```
+Run these commands from the `backend` directory with the virtual environment active.
 
 Run Django's system checks:
 
@@ -167,7 +180,23 @@ Run Django's system checks:
 python manage.py check
 ```
 
-The test suite uses Django's test database and does not depend on the local SQLite data.
+Run the automated test suite:
+
+```powershell
+python manage.py test
+```
+
+Check that model changes have matching migrations:
+
+```powershell
+python manage.py makemigrations --check --dry-run
+```
+
+The expected migration-check output is `No changes detected`. The test suite uses Django's test database and does not depend on the local SQLite data.
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on pushes and pull requests targeting `main`. It sets up Python 3.10, installs `backend/requirements/base.txt`, runs Django system checks, checks for missing migrations, and runs the test suite. It uses no secrets or deployment steps.
 
 ## Access model
 
