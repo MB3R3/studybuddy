@@ -1,0 +1,6 @@
+Django==4.2
+sqlparse==0.4.4
+asgiref==3.7.2
+typing_extensions==4.7.1
+tzdata==2026.5; sys_platform == "win32"
+
