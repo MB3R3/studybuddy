@@ -1,9 +1,14 @@
 from django.contrib.auth.models import User
 from django.test import Client, TestCase
 from django.urls import reverse
-from rest_framework.test import APIClient
+from rest_framework.request import Request
+from rest_framework.test import APIClient, APIRequestFactory, force_authenticate
 
-from .models import Room, Topic
+from .api.permissions import (
+    IsMessageAuthorOrReadOnly,
+    IsRoomHostOrReadOnly,
+)
+from .models import Message, Room, Topic
 
 
 class RoomAPITestCase(TestCase):
@@ -509,3 +514,120 @@ class PublicRoomAPIAccessTests(RoomAPITestCase):
                 content_type="application/json",
             )
             self.assertEqual(response.status_code, 405)
+
+
+class ObjectPermissionAPITests(TestCase):
+    unsafe_methods = ("post", "put", "patch", "delete")
+    safe_methods = ("get", "head", "options")
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.host = User.objects.create_user(
+            username="host",
+            password="StrongPass123!",
+        )
+        cls.other = User.objects.create_user(
+            username="other",
+            password="StrongPass123!",
+        )
+        cls.room = Room.objects.create(host=cls.host, name="Hosted Room")
+        cls.orphan_room = Room.objects.create(host=None, name="Orphan Room")
+        cls.message = Message.objects.create(
+            user=cls.host,
+            room=cls.room,
+            body="Hello",
+        )
+
+    def make_request(self, method, user=None):
+        request = getattr(APIRequestFactory(), method)("/")
+        if user is not None:
+            force_authenticate(request, user=user)
+        return Request(request)
+
+    def test_room_safe_methods_are_public(self):
+        permission = IsRoomHostOrReadOnly()
+
+        for method in self.safe_methods:
+            request = self.make_request(method)
+            self.assertTrue(permission.has_permission(request, None))
+            self.assertTrue(
+                permission.has_object_permission(request, None, self.room)
+            )
+
+    def test_room_anonymous_writes_are_rejected(self):
+        permission = IsRoomHostOrReadOnly()
+
+        for method in self.unsafe_methods:
+            request = self.make_request(method)
+            self.assertFalse(permission.has_permission(request, None))
+            self.assertFalse(
+                permission.has_object_permission(request, None, self.room)
+            )
+
+    def test_room_host_can_write(self):
+        permission = IsRoomHostOrReadOnly()
+
+        for method in self.unsafe_methods:
+            request = self.make_request(method, self.host)
+            self.assertTrue(permission.has_permission(request, None))
+            self.assertTrue(
+                permission.has_object_permission(request, None, self.room)
+            )
+
+    def test_room_non_host_cannot_write(self):
+        permission = IsRoomHostOrReadOnly()
+
+        for method in self.unsafe_methods:
+            request = self.make_request(method, self.other)
+            self.assertTrue(permission.has_permission(request, None))
+            self.assertFalse(
+                permission.has_object_permission(request, None, self.room)
+            )
+
+    def test_room_without_host_cannot_be_written(self):
+        permission = IsRoomHostOrReadOnly()
+        request = self.make_request("post", self.host)
+
+        self.assertFalse(
+            permission.has_object_permission(request, None, self.orphan_room)
+        )
+
+    def test_message_safe_methods_are_public(self):
+        permission = IsMessageAuthorOrReadOnly()
+
+        for method in self.safe_methods:
+            request = self.make_request(method)
+            self.assertTrue(permission.has_permission(request, None))
+            self.assertTrue(
+                permission.has_object_permission(request, None, self.message)
+            )
+
+    def test_message_anonymous_writes_are_rejected(self):
+        permission = IsMessageAuthorOrReadOnly()
+
+        for method in self.unsafe_methods:
+            request = self.make_request(method)
+            self.assertFalse(permission.has_permission(request, None))
+            self.assertFalse(
+                permission.has_object_permission(request, None, self.message)
+            )
+
+    def test_message_author_can_write(self):
+        permission = IsMessageAuthorOrReadOnly()
+
+        for method in self.unsafe_methods:
+            request = self.make_request(method, self.host)
+            self.assertTrue(permission.has_permission(request, None))
+            self.assertTrue(
+                permission.has_object_permission(request, None, self.message)
+            )
+
+    def test_message_non_author_cannot_write(self):
+        permission = IsMessageAuthorOrReadOnly()
+
+        for method in self.unsafe_methods:
+            request = self.make_request(method, self.other)
+            self.assertTrue(permission.has_permission(request, None))
+            self.assertFalse(
+                permission.has_object_permission(request, None, self.message)
+            )
