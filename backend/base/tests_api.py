@@ -5,7 +5,7 @@ from django.urls import reverse
 from .models import Room, Topic
 
 
-class RoomListAPITests(TestCase):
+class RoomAPITestCase(TestCase):
     @classmethod
     def setUpTestData(cls):
         cls.user = User.objects.create_user(
@@ -28,6 +28,8 @@ class RoomListAPITests(TestCase):
             description="",
         )
 
+
+class RoomListAPITests(RoomAPITestCase):
     def test_room_list_url(self):
         self.assertEqual(reverse("api:room-list"), "/api/v1/rooms/")
 
@@ -108,3 +110,94 @@ class RoomListAPITests(TestCase):
 
         self.assertEqual(payload["count"], 0)
         self.assertEqual(payload["results"], [])
+
+
+class RoomDetailAPITests(RoomAPITestCase):
+    def test_room_detail_url(self):
+        self.assertEqual(
+            reverse("api:room-detail", args=[self.room.pk]),
+            f"/api/v1/rooms/{self.room.pk}/",
+        )
+
+    def test_room_detail_returns_expected_public_fields(self):
+        response = self.client.get(
+            reverse("api:room-detail", args=[self.room.pk])
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response["Content-Type"].startswith("application/json"))
+
+        data = response.json()
+        self.assertEqual(
+            set(data),
+            {
+                "id",
+                "name",
+                "description",
+                "host",
+                "topic",
+                "participant_count",
+                "updated",
+                "created",
+            },
+        )
+        self.assertEqual(data["id"], self.room.pk)
+        self.assertEqual(data["name"], "Python Room")
+        self.assertEqual(data["description"], "Learn Python")
+        self.assertEqual(data["host"], "alice")
+        self.assertEqual(data["topic"], "Python")
+        self.assertEqual(data["participant_count"], 1)
+        self.assertNotIn("alice@example.com", response.content.decode())
+
+    def test_room_detail_matches_room_list_payload(self):
+        detail_response = self.client.get(
+            reverse("api:room-detail", args=[self.room.pk])
+        )
+        list_response = self.client.get(reverse("api:room-list"))
+        listed_room = next(
+            room
+            for room in list_response.json()["results"]
+            if room["id"] == self.room.pk
+        )
+
+        self.assertEqual(detail_response.json(), listed_room)
+
+    def test_anonymous_user_can_retrieve_room(self):
+        self.assertNotIn("_auth_user_id", self.client.session)
+
+        response = self.client.get(
+            reverse("api:room-detail", args=[self.room.pk])
+        )
+
+        self.assertEqual(response.status_code, 200)
+
+    def test_missing_room_returns_404(self):
+        response = self.client.get(
+            reverse("api:room-detail", args=[999999])
+        )
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_room_detail_rejects_write_methods(self):
+        url = reverse("api:room-detail", args=[self.room.pk])
+
+        for method in ("post", "put", "patch"):
+            response = getattr(self.client, method)(
+                url,
+                {},
+                content_type="application/json",
+            )
+            self.assertEqual(response.status_code, 405)
+
+        response = self.client.delete(url)
+        self.assertEqual(response.status_code, 405)
+
+    def test_room_list_still_lists_rooms(self):
+        response = self.client.get(reverse("api:room-list"))
+        payload = response.json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(
+            self.room.pk,
+            [room["id"] for room in payload["results"]],
+        )
