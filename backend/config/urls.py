@@ -22,15 +22,9 @@ from django.urls import path, include
 
 urlpatterns = [
     path('admin/', admin.site.urls),
-    path('api/v1/', include(("base.api.urls", "api"), namespace="api"),),
+    path(
+        'api/v1/',
+        include(("base.api.urls", "api"), namespace="api"),),    
     path('', include("base.urls")),
 ]
 
-# urlpatterns = [
-#     path('admin/', admin.site.urls),
-#     path(
-#         'api/v1/',
-#         include(("base.api.urls", "api"), namespace="api"),
-#     ),
-#     path('', include("base.urls")),
-# ]
