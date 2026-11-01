@@ -1,6 +1,7 @@
 from django.contrib.auth.models import User
-from django.test import TestCase
+from django.test import Client, TestCase
 from django.urls import reverse
+from rest_framework.test import APIClient
 
 from .models import Room, Topic
 
@@ -201,3 +202,310 @@ class RoomDetailAPITests(RoomAPITestCase):
             self.room.pk,
             [room["id"] for room in payload["results"]],
         )
+
+
+class CSRFAPITests(TestCase):
+    def test_csrf_endpoint_returns_json_and_sets_cookie(self):
+        client = Client(enforce_csrf_checks=True)
+
+        response = client.get(reverse("api:csrf"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response["Content-Type"].startswith("application/json"))
+        self.assertEqual(response.json(), {"detail": "CSRF cookie set."})
+        self.assertIn("csrftoken", response.cookies)
+        self.assertIn("csrftoken", client.cookies)
+
+
+class AnonymousAuthCSRFAPITests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user(
+            username="alice",
+            password="StrongPass123!",
+        )
+
+    def _csrf_token(self, client):
+        client.get(reverse("api:csrf"))
+        return client.cookies["csrftoken"].value
+
+    def test_login_without_csrf_token_is_rejected(self):
+        client = APIClient(enforce_csrf_checks=True)
+
+        response = client.post(
+            reverse("api:login"),
+            {"username": "alice", "password": "StrongPass123!"},
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertNotIn("_auth_user_id", client.session)
+
+    def test_registration_without_csrf_token_is_rejected(self):
+        client = APIClient(enforce_csrf_checks=True)
+
+        response = client.post(
+            reverse("api:register"),
+            {
+                "username": "newuser",
+                "password": "StrongPass123!",
+                "password2": "StrongPass123!",
+            },
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(User.objects.filter(username="newuser").exists())
+
+    def test_login_with_valid_csrf_token_succeeds(self):
+        client = APIClient(enforce_csrf_checks=True)
+        token = self._csrf_token(client)
+
+        response = client.post(
+            reverse("api:login"),
+            {"username": "alice", "password": "StrongPass123!"},
+            HTTP_X_CSRFTOKEN=token,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            client.session["_auth_user_id"], str(self.user.pk)
+        )
+
+    def test_registration_with_valid_csrf_token_succeeds(self):
+        client = APIClient(enforce_csrf_checks=True)
+        token = self._csrf_token(client)
+
+        response = client.post(
+            reverse("api:register"),
+            {
+                "username": "newuser",
+                "password": "StrongPass123!",
+                "password2": "StrongPass123!",
+            },
+            HTTP_X_CSRFTOKEN=token,
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertTrue(
+            User.objects.get(username="newuser").check_password(
+                "StrongPass123!"
+            )
+        )
+
+
+class RegistrationAPITests(TestCase):
+    def test_registration_creates_user_with_hashed_password(self):
+        response = self.client.post(
+            reverse("api:register"),
+            {
+                "username": "newuser",
+                "password": "StrongPass123!",
+                "password2": "StrongPass123!",
+            },
+        )
+
+        self.assertEqual(response.status_code, 201)
+        user = User.objects.get(username="newuser")
+        self.assertTrue(user.check_password("StrongPass123!"))
+        self.assertNotEqual(user.password, "StrongPass123!")
+        self.assertEqual(set(response.json()), {"id", "username"})
+        self.assertEqual(response.json()["username"], "newuser")
+        self.assertNotIn("password", response.content.decode())
+        self.assertNotIn("_auth_user_id", self.client.session)
+
+    def test_registration_accepts_password1_and_password2(self):
+        response = self.client.post(
+            reverse("api:register"),
+            {
+                "username": "newuser",
+                "password1": "StrongPass123!",
+                "password2": "StrongPass123!",
+            },
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertTrue(
+            User.objects.get(username="newuser").check_password(
+                "StrongPass123!"
+            )
+        )
+
+    def test_duplicate_username_is_rejected(self):
+        User.objects.create_user(
+            username="newuser",
+            password="StrongPass123!",
+        )
+
+        response = self.client.post(
+            reverse("api:register"),
+            {
+                "username": "newuser",
+                "password": "StrongPass123!",
+                "password2": "StrongPass123!",
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("username", response.json())
+        self.assertEqual(User.objects.filter(username="newuser").count(), 1)
+
+    def test_invalid_password_is_rejected(self):
+        response = self.client.post(
+            reverse("api:register"),
+            {
+                "username": "newuser",
+                "password": "123",
+                "password2": "123",
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("password", response.json())
+        self.assertFalse(User.objects.filter(username="newuser").exists())
+
+    def test_mismatched_passwords_are_rejected(self):
+        response = self.client.post(
+            reverse("api:register"),
+            {
+                "username": "newuser",
+                "password": "StrongPass123!",
+                "password2": "DifferentPass123!",
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("password2", response.json())
+        self.assertFalse(User.objects.filter(username="newuser").exists())
+
+
+class LoginLogoutAPITests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user(
+            username="alice",
+            email="alice@example.com",
+            password="StrongPass123!",
+        )
+
+    def test_login_creates_session_and_returns_safe_user(self):
+        response = self.client.post(
+            reverse("api:login"),
+            {"username": "alice", "password": "StrongPass123!"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            self.client.session["_auth_user_id"], str(self.user.pk)
+        )
+        self.assertEqual(set(response.json()), {"id", "username"})
+        self.assertEqual(response.json()["username"], "alice")
+        self.assertNotIn("password", response.content.decode())
+        self.assertNotIn("alice@example.com", response.content.decode())
+
+        me_response = self.client.get(reverse("api:me"))
+        self.assertEqual(me_response.status_code, 200)
+
+    def test_login_with_invalid_credentials_is_rejected(self):
+        response = self.client.post(
+            reverse("api:login"),
+            {"username": "alice", "password": "wrong-password"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertNotIn("_auth_user_id", self.client.session)
+
+    def test_logout_requires_authentication(self):
+        response = self.client.post(reverse("api:logout"))
+
+        self.assertIn(response.status_code, (401, 403))
+
+    def test_logout_clears_session(self):
+        self.client.force_login(self.user)
+
+        response = self.client.post(reverse("api:logout"))
+
+        self.assertEqual(response.status_code, 204)
+        self.assertNotIn("_auth_user_id", self.client.session)
+
+    def test_logout_rejects_get(self):
+        self.client.force_login(self.user)
+
+        response = self.client.get(reverse("api:logout"))
+
+        self.assertEqual(response.status_code, 405)
+
+    def test_authenticated_logout_requires_csrf(self):
+        client = Client(enforce_csrf_checks=True)
+        client.force_login(self.user)
+
+        response = client.post(reverse("api:logout"))
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("_auth_user_id", client.session)
+
+        client.get(reverse("api:csrf"))
+        token = client.cookies["csrftoken"].value
+        response = client.post(
+            reverse("api:logout"),
+            HTTP_X_CSRFTOKEN=token,
+        )
+
+        self.assertEqual(response.status_code, 204)
+        self.assertNotIn("_auth_user_id", client.session)
+
+
+class CurrentUserAPITests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user(
+            username="alice",
+            email="alice@example.com",
+            password="StrongPass123!",
+        )
+
+    def test_anonymous_user_cannot_access_me(self):
+        response = self.client.get(reverse("api:me"))
+
+        self.assertIn(response.status_code, (401, 403))
+
+    def test_authenticated_user_can_access_me(self):
+        self.client.force_login(self.user)
+
+        response = self.client.get(reverse("api:me"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            {"id": self.user.pk, "username": "alice"},
+        )
+        self.assertNotIn("password", response.content.decode())
+        self.assertNotIn("alice@example.com", response.content.decode())
+
+
+class PublicRoomAPIAccessTests(RoomAPITestCase):
+    def test_room_list_remains_public(self):
+        response = self.client.get(reverse("api:room-list"))
+
+        self.assertEqual(response.status_code, 200)
+
+    def test_room_detail_remains_public(self):
+        response = self.client.get(
+            reverse("api:room-detail", args=[self.room.pk])
+        )
+
+        self.assertEqual(response.status_code, 200)
+
+    def test_room_list_rejects_write_methods(self):
+        response = self.client.post(reverse("api:room-list"), {})
+
+        self.assertEqual(response.status_code, 405)
+
+    def test_room_detail_rejects_write_methods(self):
+        url = reverse("api:room-detail", args=[self.room.pk])
+
+        for method in ("post", "put", "patch", "delete"):
+            response = getattr(self.client, method)(
+                url,
+                {},
+                content_type="application/json",
+            )
+            self.assertEqual(response.status_code, 405)
