@@ -431,6 +431,14 @@ class LoginLogoutAPITests(TestCase):
         self.assertEqual(response.status_code, 204)
         self.assertNotIn("_auth_user_id", self.client.session)
 
+    def test_logout_invalidates_access_to_protected_endpoint(self):
+        self.client.force_login(self.user)
+
+        self.client.post(reverse("api:logout"))
+        response = self.client.get(reverse("api:me"))
+
+        self.assertIn(response.status_code, (401, 403))
+
     def test_logout_rejects_get(self):
         self.client.force_login(self.user)
 
@@ -537,6 +545,11 @@ class ObjectPermissionAPITests(TestCase):
             room=cls.room,
             body="Hello",
         )
+        cls.other_message = Message.objects.create(
+            user=cls.other,
+            room=cls.room,
+            body="Other",
+        )
 
     def make_request(self, method, user=None):
         request = getattr(APIRequestFactory(), method)("/")
@@ -631,3 +644,48 @@ class ObjectPermissionAPITests(TestCase):
             self.assertFalse(
                 permission.has_object_permission(request, None, self.message)
             )
+
+    def test_room_host_cannot_modify_another_users_message(self):
+        permission = IsMessageAuthorOrReadOnly()
+
+        for method in self.unsafe_methods:
+            request = self.make_request(method, self.host)
+            self.assertTrue(permission.has_permission(request, None))
+            self.assertFalse(
+                permission.has_object_permission(
+                    request,
+                    None,
+                    self.other_message,
+                )
+            )
+
+
+class AuthEndpointMethodAPITests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user(
+            username="alice",
+            password="StrongPass123!",
+        )
+
+    def test_login_rejects_get(self):
+        response = self.client.get(reverse("api:login"))
+
+        self.assertEqual(response.status_code, 405)
+
+    def test_registration_rejects_get(self):
+        response = self.client.get(reverse("api:register"))
+
+        self.assertEqual(response.status_code, 405)
+
+    def test_csrf_endpoint_rejects_post(self):
+        response = self.client.post(reverse("api:csrf"))
+
+        self.assertEqual(response.status_code, 405)
+
+    def test_me_rejects_post(self):
+        self.client.force_login(self.user)
+
+        response = self.client.post(reverse("api:me"))
+
+        self.assertEqual(response.status_code, 405)
