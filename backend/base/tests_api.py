@@ -1,4 +1,5 @@
 from django.contrib.auth.models import User
+from django.db import IntegrityError, transaction
 from django.test import Client, TestCase
 from django.urls import reverse
 from rest_framework.request import Request
@@ -689,3 +690,461 @@ class AuthEndpointMethodAPITests(TestCase):
         response = self.client.post(reverse("api:me"))
 
         self.assertEqual(response.status_code, 405)
+
+
+class ProfileAPITests(TestCase):
+    def setUp(self):
+        self.alice = User.objects.create_user(
+            username="alice",
+            email="alice@example.com",
+            password="StrongPass123!",
+        )
+        self.bob = User.objects.create_user(
+            username="bob",
+            email="bob@example.com",
+            password="StrongPass123!",
+        )
+        self.topic = Topic.objects.create(name="Python")
+        self.alice_room = Room.objects.create(
+            host=self.alice,
+            topic=self.topic,
+            name="Alice Room",
+            description="Alice's study room",
+        )
+        self.bob_room = Room.objects.create(
+            host=self.bob,
+            topic=self.topic,
+            name="Bob Room",
+            description="Bob's study room",
+        )
+        self.alice_room.participants.add(self.alice)
+        self.bob_room.participants.add(self.alice)
+        self.alice_message = Message.objects.create(
+            user=self.alice,
+            room=self.alice_room,
+            body="Alice message",
+        )
+        self.bob_message = Message.objects.create(
+            user=self.bob,
+            room=self.bob_room,
+            body="Bob message",
+        )
+
+    def test_profile_detail_url(self):
+        self.assertEqual(
+            reverse("api:profile-detail", args=[self.alice.pk]),
+            f"/api/v1/profiles/{self.alice.pk}/",
+        )
+
+    def test_my_profile_url(self):
+        self.assertEqual(reverse("api:profile-me"), "/api/v1/profiles/me/")
+
+    def test_public_profile_returns_public_data(self):
+        response = self.client.get(
+            reverse("api:profile-detail", args=[self.alice.pk])
+        )
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(
+            set(data),
+            {"id", "username", "hosted_rooms", "messages"},
+        )
+        self.assertEqual(data["id"], self.alice.pk)
+        self.assertEqual(data["username"], "alice")
+        self.assertEqual(
+            [room["id"] for room in data["hosted_rooms"]],
+            [self.alice_room.pk],
+        )
+        self.assertEqual(
+            data["hosted_rooms"][0]["name"],
+            "Alice Room",
+        )
+        self.assertEqual(
+            data["hosted_rooms"][0]["participant_count"],
+            1,
+        )
+        self.assertEqual(
+            [message["id"] for message in data["messages"]],
+            [self.alice_message.pk],
+        )
+        self.assertEqual(
+            data["messages"][0]["body"],
+            "Alice message",
+        )
+        self.assertEqual(
+            data["messages"][0]["room"],
+            {"id": self.alice_room.pk, "name": "Alice Room"},
+        )
+
+    def test_public_profile_excludes_private_fields(self):
+        response = self.client.get(
+            reverse("api:profile-detail", args=[self.alice.pk])
+        )
+        content = response.content.decode()
+        data = response.json()
+
+        self.assertNotIn("alice@example.com", content)
+        self.assertNotIn("bob@example.com", content)
+        self.assertNotIn("password", content)
+        self.assertNotIn("pbkdf2_", content)
+        self.assertNotIn("email", data)
+        for room in data["hosted_rooms"]:
+            self.assertNotIn("email", room)
+        for message in data["messages"]:
+            self.assertNotIn("email", message)
+
+    def test_profile_detail_missing_returns_404(self):
+        response = self.client.get(
+            reverse("api:profile-detail", args=[999999])
+        )
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_profile_detail_rejects_write_methods(self):
+        url = reverse("api:profile-detail", args=[self.alice.pk])
+
+        for method in ("post", "put", "patch", "delete"):
+            response = getattr(self.client, method)(
+                url,
+                {},
+                content_type="application/json",
+            )
+            self.assertEqual(response.status_code, 405)
+
+    def test_profile_messages_are_limited_to_recent(self):
+        for index in range(25):
+            Message.objects.create(
+                user=self.alice,
+                room=self.alice_room,
+                body=f"Recent {index}",
+            )
+
+        response = self.client.get(
+            reverse("api:profile-detail", args=[self.alice.pk])
+        )
+        messages = response.json()["messages"]
+
+        self.assertEqual(len(messages), 20)
+        self.assertEqual(messages[0]["body"], "Recent 24")
+        self.assertNotIn(
+            self.alice_message.body,
+            [message["body"] for message in messages],
+        )
+
+    def test_my_profile_requires_authentication(self):
+        url = reverse("api:profile-me")
+
+        get_response = self.client.get(url)
+        patch_response = self.client.patch(
+            url,
+            {"username": "anonymous"},
+            content_type="application/json",
+        )
+
+        self.assertIn(get_response.status_code, (401, 403))
+        self.assertIn(patch_response.status_code, (401, 403))
+        self.alice.refresh_from_db()
+        self.assertEqual(self.alice.username, "alice")
+
+    def test_my_profile_returns_private_fields_to_self(self):
+        self.client.force_login(self.alice)
+
+        response = self.client.get(reverse("api:profile-me"))
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(set(data), {"id", "username", "email"})
+        self.assertEqual(data["id"], self.alice.pk)
+        self.assertEqual(data["username"], "alice")
+        self.assertEqual(data["email"], "alice@example.com")
+        self.assertNotIn("password", response.content.decode())
+        self.assertNotIn("pbkdf2_", response.content.decode())
+
+    def test_my_profile_patch_updates_username_and_email(self):
+        self.client.force_login(self.alice)
+
+        response = self.client.patch(
+            reverse("api:profile-me"),
+            {
+                "username": "alice-updated",
+                "email": "alice-new@example.com",
+            },
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["username"], "alice-updated")
+        self.assertEqual(
+            response.json()["email"],
+            "alice-new@example.com",
+        )
+        self.alice.refresh_from_db()
+        self.assertEqual(self.alice.username, "alice-updated")
+        self.assertEqual(self.alice.email, "alice-new@example.com")
+
+    def test_my_profile_patch_allows_blank_email(self):
+        self.client.force_login(self.alice)
+
+        response = self.client.patch(
+            reverse("api:profile-me"),
+            {"email": ""},
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.alice.refresh_from_db()
+        self.assertEqual(self.alice.email, "")
+
+    def test_my_profile_patch_does_not_modify_another_user(self):
+        self.client.force_login(self.alice)
+
+        self.client.patch(
+            reverse("api:profile-me"),
+            {
+                "username": "alice-updated",
+                "email": "alice-new@example.com",
+            },
+            content_type="application/json",
+        )
+        self.bob.refresh_from_db()
+
+        self.assertEqual(self.bob.username, "bob")
+        self.assertEqual(self.bob.email, "bob@example.com")
+
+    def test_public_profile_cannot_be_updated_directly(self):
+        self.client.force_login(self.alice)
+
+        response = self.client.patch(
+            reverse("api:profile-detail", args=[self.bob.pk]),
+            {"username": "hacked"},
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 405)
+        self.bob.refresh_from_db()
+        self.assertEqual(self.bob.username, "bob")
+
+    def test_my_profile_patch_rejects_duplicate_username(self):
+        self.client.force_login(self.alice)
+
+        for username in ("bob", "BOB"):
+            with self.subTest(username=username):
+                response = self.client.patch(
+                    reverse("api:profile-me"),
+                    {"username": username},
+                    content_type="application/json",
+                )
+
+                self.assertEqual(response.status_code, 400)
+                self.assertIn("username", response.json())
+                self.alice.refresh_from_db()
+                self.assertEqual(self.alice.username, "alice")
+
+    def test_my_profile_patch_rejects_invalid_username(self):
+        self.client.force_login(self.alice)
+
+        response = self.client.patch(
+            reverse("api:profile-me"),
+            {"username": "bad username"},
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("username", response.json())
+
+    def test_my_profile_patch_rejects_invalid_email(self):
+        self.client.force_login(self.alice)
+
+        response = self.client.patch(
+            reverse("api:profile-me"),
+            {"email": "not-an-email"},
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("email", response.json())
+
+    def test_my_profile_patch_ignores_protected_fields(self):
+        self.client.force_login(self.alice)
+        original_password = self.alice.password
+
+        response = self.client.patch(
+            reverse("api:profile-me"),
+            {
+                "username": "alice-updated",
+                "password": "HackedPass123!",
+                "is_staff": True,
+                "is_superuser": True,
+                "is_active": False,
+            },
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.alice.refresh_from_db()
+        self.assertEqual(self.alice.password, original_password)
+        self.assertTrue(self.alice.check_password("StrongPass123!"))
+        self.assertFalse(self.alice.is_staff)
+        self.assertFalse(self.alice.is_superuser)
+        self.assertTrue(self.alice.is_active)
+        self.assertNotIn("password", response.content.decode())
+        self.assertNotIn("is_staff", response.content.decode())
+
+    def test_my_profile_rejects_put(self):
+        self.client.force_login(self.alice)
+
+        response = self.client.put(
+            reverse("api:profile-me"),
+            {"username": "alice-updated"},
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 405)
+
+    def test_my_profile_patch_requires_csrf(self):
+        client = Client(enforce_csrf_checks=True)
+        client.force_login(self.alice)
+        url = reverse("api:profile-me")
+
+        response = client.patch(
+            url,
+            {"username": "alice-updated"},
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.alice.refresh_from_db()
+        self.assertEqual(self.alice.username, "alice")
+
+        client.get(reverse("api:csrf"))
+        token = client.cookies["csrftoken"].value
+        response = client.patch(
+            url,
+            {"username": "alice-updated"},
+            content_type="application/json",
+            HTTP_X_CSRFTOKEN=token,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.alice.refresh_from_db()
+        self.assertEqual(self.alice.username, "alice-updated")
+
+
+class ProfileModelTests(TestCase):
+    def test_user_row_is_the_profile_record(self):
+        user = User.objects.create_user(
+            username="alice",
+            email="alice@example.com",
+            password="StrongPass123!",
+        )
+
+        profile = User.objects.get(pk=user.pk)
+
+        self.assertEqual(User.objects.count(), 1)
+        self.assertEqual(profile.username, "alice")
+        self.assertEqual(profile.email, "alice@example.com")
+        self.assertTrue(profile.check_password("StrongPass123!"))
+
+    def test_duplicate_profile_identity_is_prevented(self):
+        User.objects.create_user(
+            username="alice",
+            password="StrongPass123!",
+        )
+
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                User.objects.create_user(
+                    username="alice",
+                    password="StrongPass123!",
+                )
+
+        self.assertEqual(User.objects.filter(username="alice").count(), 1)
+        self.assertEqual(User.objects.count(), 1)
+
+
+class ProfileLifecycleTests(TestCase):
+    def test_existing_user_profile_is_available_without_extra_record(self):
+        user = User.objects.create_user(
+            username="existing",
+            email="existing@example.com",
+            password="StrongPass123!",
+        )
+
+        response = self.client.get(
+            reverse("api:profile-detail", args=[user.pk])
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["id"], user.pk)
+        self.assertEqual(response.json()["username"], "existing")
+        self.assertEqual(
+            response.json()["hosted_rooms"],
+            [],
+        )
+        self.assertEqual(response.json()["messages"], [])
+        self.assertEqual(User.objects.count(), 1)
+
+    def test_api_registration_user_has_retrievable_profile(self):
+        register_response = self.client.post(
+            reverse("api:register"),
+            {
+                "username": "newuser",
+                "password": "StrongPass123!",
+                "password2": "StrongPass123!",
+            },
+        )
+
+        self.assertEqual(register_response.status_code, 201)
+        user = User.objects.get(username="newuser")
+        profile_response = self.client.get(
+            reverse("api:profile-detail", args=[user.pk])
+        )
+
+        self.assertEqual(profile_response.status_code, 200)
+        self.assertEqual(profile_response.json()["id"], user.pk)
+        self.assertEqual(profile_response.json()["username"], "newuser")
+        self.assertEqual(User.objects.count(), 1)
+
+    def test_html_registration_user_has_retrievable_profile(self):
+        response = self.client.post(
+            reverse("register"),
+            {
+                "username": "NewUser",
+                "password1": "StrongPass123!",
+                "password2": "StrongPass123!",
+            },
+        )
+
+        self.assertRedirects(response, reverse("home"))
+        user = User.objects.get(username="newuser")
+        profile_response = self.client.get(
+            reverse("api:profile-detail", args=[user.pk])
+        )
+
+        self.assertEqual(profile_response.status_code, 200)
+        self.assertEqual(profile_response.json()["username"], "newuser")
+
+    def test_profile_update_does_not_create_duplicate_user(self):
+        user = User.objects.create_user(
+            username="alice",
+            email="alice@example.com",
+            password="StrongPass123!",
+        )
+        self.client.force_login(user)
+
+        response = self.client.patch(
+            reverse("api:profile-me"),
+            {
+                "username": "alice-updated",
+                "email": "alice-new@example.com",
+            },
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(User.objects.count(), 1)
+        self.assertTrue(
+            User.objects.filter(username="alice-updated").exists()
+        )
+        self.assertFalse(User.objects.filter(username="alice").exists())

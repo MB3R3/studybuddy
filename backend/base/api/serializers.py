@@ -4,7 +4,9 @@ from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import serializers
 
-from ..models import Room
+from ..models import Message, Room
+
+PROFILE_MESSAGE_LIMIT = 20
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -107,3 +109,58 @@ class RoomSerializer(serializers.ModelSerializer):
             "updated",
             "created",
         ]
+
+
+class ProfileMessageRoomSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Room
+        fields = ["id", "name"]
+        read_only_fields = fields
+
+
+class ProfileMessageSerializer(serializers.ModelSerializer):
+    room = ProfileMessageRoomSerializer(read_only=True)
+
+    class Meta:
+        model = Message
+        fields = ["id", "body", "room", "updated", "created"]
+        read_only_fields = fields
+
+
+class PublicProfileSerializer(serializers.ModelSerializer):
+    hosted_rooms = RoomSerializer(source="room_set", many=True, read_only=True)
+    messages = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = ["id", "username", "hosted_rooms", "messages"]
+        read_only_fields = fields
+
+    def get_messages(self, obj):
+        messages = obj.message_set.select_related("room").order_by(
+            "-created", "-id"
+        )[:PROFILE_MESSAGE_LIMIT]
+        return ProfileMessageSerializer(messages, many=True).data
+
+
+class ProfileUpdateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = ["id", "username", "email"]
+        read_only_fields = ["id"]
+
+    def validate_username(self, value):
+        username_field = User._meta.get_field("username")
+        try:
+            username_field.run_validators(value)
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError(list(exc.messages))
+
+        queryset = User.objects.filter(username__iexact=value)
+        if self.instance is not None:
+            queryset = queryset.exclude(pk=self.instance.pk)
+        if queryset.exists():
+            raise serializers.ValidationError(
+                "A user with that username already exists."
+            )
+        return value

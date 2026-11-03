@@ -5,6 +5,8 @@ from .views import (
     LoginAPIView,
     LogoutAPIView,
     MeAPIView,
+    MyProfileAPIView,
+    ProfileDetailAPIView,
     RegisterAPIView,
     RoomDetailAPIView,
     RoomListAPIView,
@@ -24,4 +26,14 @@ urlpatterns = [
     path("users/login/", LoginAPIView.as_view(), name="login"),
     path("users/logout/", LogoutAPIView.as_view(), name="logout"),
     path("users/me/", MeAPIView.as_view(), name="me"),
+    path(
+        "profiles/me/",
+        MyProfileAPIView.as_view(),
+        name="profile-me",
+    ),
+    path(
+        "profiles/<int:pk>/",
+        ProfileDetailAPIView.as_view(),
+        name="profile-detail",
+    ),
 ]

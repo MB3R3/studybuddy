@@ -1,6 +1,7 @@
 from django.contrib.auth import login as auth_login
 from django.contrib.auth import logout as auth_logout
-from django.db.models import Count
+from django.contrib.auth.models import User
+from django.db.models import Count, Prefetch
 from django.middleware.csrf import get_token
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_protect
@@ -11,6 +12,8 @@ from rest_framework.views import APIView
 from ..models import Room
 from .serializers import (
     LoginSerializer,
+    ProfileUpdateSerializer,
+    PublicProfileSerializer,
     RegisterSerializer,
     RoomSerializer,
     UserSerializer,
@@ -68,6 +71,39 @@ class MeAPIView(APIView):
 
     def get(self, request):
         return Response(UserSerializer(request.user).data)
+
+
+class ProfileDetailAPIView(generics.RetrieveAPIView):
+    serializer_class = PublicProfileSerializer
+    permission_classes = [permissions.AllowAny]
+
+    def get_queryset(self):
+        hosted_rooms = (
+            Room.objects.select_related("host", "topic")
+            .annotate(participant_count=Count("participants"))
+            .order_by("-updated", "-created")
+        )
+        return User.objects.prefetch_related(
+            Prefetch("room_set", queryset=hosted_rooms),
+        )
+
+
+class MyProfileAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+    http_method_names = ["get", "patch"]
+
+    def get(self, request):
+        return Response(ProfileUpdateSerializer(request.user).data)
+
+    def patch(self, request):
+        serializer = ProfileUpdateSerializer(
+            request.user,
+            data=request.data,
+            partial=True,
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data)
 
 
 class RoomQuerySetMixin:
